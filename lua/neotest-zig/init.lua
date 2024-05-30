@@ -210,6 +210,7 @@ function M._build_spec_with_buildfile(args, build_file_path)
     vim.loop.fs_mkdir(test_runner_logs_dir_path, 493)
 
     local zig_test_command = 'zig build test' ..
+        ' -Dtest-filter=' .. args.tree:data().name .. '' ..
         ' --build-file "' .. target_neotest_build_file_path .. '"' ..
         ' -Dneotest-runner="' .. test_runner_path .. '"' ..
         ' -- ' ..
@@ -227,38 +228,50 @@ function M._build_spec_with_buildfile(args, build_file_path)
     }
 
     if (args.strategy == "dap") then
-        test_program_paths = vim.fn.glob(vim.fn.getcwd() .. "/zig-out/test/*")
-        local _, programs_count = test_program_paths:gsub('\n', '\n')
-
-        local program_path = ""
-        if (programs_count > 0) then
-            program_path = vim.fn.input(
-                "Found multiple programs to debug, choose one:\n" .. test_program_paths .. "\n\nPath to executable: ",
-                vim.fn.glob(vim.fn.getcwd() .. "/zig-out/test/"),
-                "file")
-        else
-            program_path = test_program_paths
+        local target_neotest_runner_file_path = build_file_dir_path .. "neotest_runner.zig"
+        log.trace(target_neotest_runner_file_path)
+        local runner_copy_success, runner_copy_errmsg = vim.loop.fs_copyfile(test_runner_path,
+            target_neotest_runner_file_path)
+        if not runner_copy_success then
+            log.error("Could not copy from", test_runner_path, "to", build_file_path, runner_copy_errmsg)
+            return
         end
-
-        if (program_path == "") then
-            -- Cancelled
-            return nil;
-        end
+        run_spec.command = ''
+        -- run_spec.command = 'zig build neotest-build --build-file ' ..
+        --     target_neotest_build_file_path .. '-Dneotest-runner=neotest_runner.zig'
+        run_spec.context.temp_neotest_runner_file_path = target_neotest_runner_file_path
 
         run_spec.strategy = {
             name = "Debug with neotest-zig",
-            type = "codelldb",
+            type = "lldb",
             request = "launch",
+            openInTerminal = true,
+            cwd = '${workspaceFolder}',
             program = function()
-                vim.fn.system(
-                    "zig build neotest-build --build-file neotest_build.zig -Dneotest-runner=\"/Users/llaz/git/neotest-zig/zig/neotest_runner.zig\"")
-                return program_path
+                local build_output = vim.fn.glob(vim.fn.getcwd() .. "/zig-out/test/*")
+                local programs, program_count = build_output:gsub('\n', '\n')
+                if program_count == 0 then
+                    return programs
+                end
+                -- TODO handle multiple output
+                return programs[1]
+            end,
+            before = function()
+                local build_result = vim.system({
+                    "zig", "build", "neotest-build", "--build-file", target_neotest_build_file_path,
+                    "-Dneotest-runner=neotest_runner.zig",
+                }):wait()
+                if build_result.code ~= 0 then
+                    -- how to show message when this happens?
+                    log.error("build step failed: ", build_result)
+                end
             end,
             args = {
                 '--neotest-input-path', neotest_input_path,
                 '--neotest-results-path', neotest_results_path,
                 '--test-runner-logs-path', test_runner_logs_dir_path,
                 '--test-runner-log-level', '' .. log.get_log_level(),
+                ' -Dtest-filter=' .. args.tree:data().name .. ' ',
             },
         }
     end
@@ -422,6 +435,12 @@ function M.results(spec, result, tree)
         local success = pcall(os.remove, spec.context.temp_neotest_build_file_path)
         if not success then
             log.debug("Could not delete `temp_neotest_build_file_path`", spec.context.temp_neotest_build_file_path)
+        end
+    end
+    if spec.context.temp_neotest_runner_file_path then
+        local success = pcall(os.remove, spec.context.temp_neotest_runner_file_path)
+        if not success then
+            log.debug("Could not delete `temp_neotest_runner_file_path`", spec.context.temp_neotest_runner_file_path)
         end
     end
 
